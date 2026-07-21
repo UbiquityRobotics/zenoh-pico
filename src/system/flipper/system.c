@@ -187,7 +187,7 @@ z_result_t z_sleep_s(size_t time) {
 
 /*------------------ Instant ------------------*/
 void __z_clock_gettime(z_clock_t* ts) {
-    uint64_t m = millis();
+    uint64_t m = millis()
     ts->tv_sec = m / (uint64_t)1000000;
     ts->tv_nsec = (m % (uint64_t)1000000) * (uint64_t)1000;
 }

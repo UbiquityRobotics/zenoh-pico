@@ -217,28 +217,3 @@
 #define ZP_ASM_NOP __asm__("nop")
 
 #endif /* INCLUDE_ZENOH_PICO_CONFIG_H */
-
-/*------------------ Connect behaviour properties ------------------*/
-
-#ifdef Z_FEATURE_UNSTABLE_API
-#define Z_CONFIG_CONNECT_TIMEOUT_KEY 0x57
-#endif
-#define Z_CONFIG_CONNECT_TIMEOUT_DEFAULT "0"
-
-#ifdef Z_FEATURE_UNSTABLE_API
-#define Z_CONFIG_CONNECT_EXIT_ON_FAILURE_KEY 0x58
-#endif
-#define Z_CONFIG_CONNECT_EXIT_ON_FAILURE_CLIENT_DEFAULT "true"
-#define Z_CONFIG_CONNECT_EXIT_ON_FAILURE_PEER_DEFAULT "false"
-
-/*------------------ Listen behaviour properties ------------------*/
-
-#ifdef Z_FEATURE_UNSTABLE_API
-#define Z_CONFIG_LISTEN_TIMEOUT_KEY 0x59
-#endif
-#define Z_CONFIG_LISTEN_TIMEOUT_DEFAULT "0"
-
-#ifdef Z_FEATURE_UNSTABLE_API
-#define Z_CONFIG_LISTEN_EXIT_ON_FAILURE_KEY 0x5A
-#endif
-#define Z_CONFIG_LISTEN_EXIT_ON_FAILURE_DEFAULT "true"
