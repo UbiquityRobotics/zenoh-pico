@@ -43,7 +43,7 @@ void z_random_fill(void *buf, size_t len) {
 void *z_malloc(size_t size) {
     void *ptr = NULL;
 
-    uint8_t r = tx_byte_allocate(pthreadx_byte_pool, &ptr, size, TX_WAIT_FOREVER);
+    uint8_t r = tx_byte_allocate(pthreadx_byte_pool, &ptr, size, TX_NO_WAIT);
     if (r != TX_SUCCESS) {
         ptr = NULL;
     }
@@ -83,6 +83,7 @@ z_result_t _z_task_join(_z_task_t *task) {
         tx_thread_sleep(1);
     }
 
+    tx_thread_delete(&(task->threadx_thread));
     return _Z_RES_OK;
 }
 
@@ -265,9 +266,9 @@ z_result_t z_sleep_s(size_t time) {
 /*------------------ Clock ------------------*/
 
 void __z_clock_gettime(z_clock_t *ts) {
-    uint64_t time_ns = (uint64_t)tx_time_get() * 1000000000ULL / TX_TIMER_TICKS_PER_SECOND;
-    ts->tv_sec = time_ns / 1000000000ULL;
-    ts->tv_nsec = time_ns % 1000000000ULL;
+    uint64_t ticks = (uint64_t)tx_time_get();
+    ts->tv_sec = ticks / TX_TIMER_TICKS_PER_SECOND;
+    ts->tv_nsec = (ticks % TX_TIMER_TICKS_PER_SECOND) * 1000000000ULL / TX_TIMER_TICKS_PER_SECOND;
 }
 
 z_clock_t z_clock_now(void) {
@@ -352,10 +353,10 @@ unsigned long z_time_elapsed_ms(z_time_t *time) {
 unsigned long z_time_elapsed_s(z_time_t *time) { return (tx_time_get() - *time) / TX_TIMER_TICKS_PER_SECOND; }
 
 z_result_t _z_get_time_since_epoch(_z_time_since_epoch *t) {
-    ULONG64 time_ns = tx_time_get() * 1000000000ULL / TX_TIMER_TICKS_PER_SECOND;
+    uint64_t ticks = (uint64_t)tx_time_get();
 
-    t->secs = time_ns / 1000000000ULL;
-    t->nanos = time_ns % 1000000000ULL;
+    t->secs = ticks / TX_TIMER_TICKS_PER_SECOND;
+    t->nanos = (ticks % TX_TIMER_TICKS_PER_SECOND) * 1000000000ULL / TX_TIMER_TICKS_PER_SECOND;
 
     return _Z_RES_OK;
 }
