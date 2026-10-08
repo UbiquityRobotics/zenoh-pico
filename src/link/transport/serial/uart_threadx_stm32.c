@@ -24,13 +24,15 @@
 #include "zenoh-pico/utils/logging.h"
 
 #define RX_DMA_BUFFER_SIZE (_Z_SERIAL_MAX_COBS_BUF_SIZE * 2 + 2)
+#define DELIMITER_FIFO_SIZE 32
 #define UART_CLEAR_ALL_ERRORS \
     (UART_CLEAR_PEF | UART_CLEAR_FEF | UART_CLEAR_NEF | UART_CLEAR_OREF | UART_CLEAR_IDLEF)
 
 static uint8_t _z_threadx_stm32_dma_buffer[RX_DMA_BUFFER_SIZE];
-static uint16_t _z_threadx_stm32_delimiter_offset = 0;
+static uint16_t _z_delimiter_fifo[DELIMITER_FIFO_SIZE];
+static volatile uint8_t _z_delimiter_head = 0;
+static volatile uint8_t _z_delimiter_tail = 0;
 static TX_SEMAPHORE _z_threadx_stm32_data_ready_semaphore;
-static TX_SEMAPHORE _z_threadx_stm32_data_processing_semaphore;
 static TX_MUTEX _z_threadx_stm32_tx_mutex;
 static uint8_t _z_threadx_stm32_frame_buffer[_Z_SERIAL_MAX_COBS_BUF_SIZE];
 static size_t _z_threadx_stm32_frame_len = 0;
@@ -55,16 +57,14 @@ void _z_threadx_stm32_tx_unlock(void) {
 static z_result_t _z_threadx_stm32_uart_open_impl(void) {
     if (!_z_threadx_stm32_initialized) {
         tx_semaphore_create(&_z_threadx_stm32_data_ready_semaphore, "Data Ready", 0);
-        tx_semaphore_create(&_z_threadx_stm32_data_processing_semaphore, "Data Processing", 1);
         tx_mutex_create(&_z_threadx_stm32_tx_mutex, "Zenoh TX Mutex", TX_NO_INHERIT);
         _z_threadx_stm32_initialized = true;
     }
 
     while (tx_semaphore_get(&_z_threadx_stm32_data_ready_semaphore, TX_NO_WAIT) == TX_SUCCESS) {}
-    while (tx_semaphore_get(&_z_threadx_stm32_data_processing_semaphore, TX_NO_WAIT) == TX_SUCCESS) {}
-    tx_semaphore_put(&_z_threadx_stm32_data_processing_semaphore);
 
-    _z_threadx_stm32_delimiter_offset = 0;
+    _z_delimiter_head = 0;
+    _z_delimiter_tail = 0;
     _z_threadx_stm32_last_dma_offset = 0;
     _z_threadx_stm32_isr_last_offset = 0;
     _z_threadx_stm32_frame_len = 0;
@@ -115,42 +115,51 @@ static void _z_threadx_stm32_uart_close(_z_sys_net_socket_t *sock) { _ZP_UNUSED(
 static size_t _z_threadx_stm32_uart_fill_frame(void) {
     size_t rb = 0;
 
-    if (tx_semaphore_get(&_z_threadx_stm32_data_ready_semaphore, TX_TIMER_TICKS_PER_SECOND / 10) != TX_SUCCESS) {
-        return 0;
-    }
+    while (true) {
+        if (tx_semaphore_get(&_z_threadx_stm32_data_ready_semaphore, TX_TIMER_TICKS_PER_SECOND / 10) != TX_SUCCESS) {
+            return 0;
+        }
 
-    if (_z_threadx_stm32_delimiter_offset < _z_threadx_stm32_last_dma_offset) {
-        rb = (RX_DMA_BUFFER_SIZE - _z_threadx_stm32_last_dma_offset) + _z_threadx_stm32_delimiter_offset;
-    } else {
-        rb = _z_threadx_stm32_delimiter_offset - _z_threadx_stm32_last_dma_offset;
-    }
-    
-    if (rb == 0) {
-        return 0;
-    }
-    if (rb > sizeof(_z_threadx_stm32_frame_buffer)) {
-        return SIZE_MAX;
-    }
+        if (_z_delimiter_tail == _z_delimiter_head) {
+            return 0;
+        }
 
-    if (_z_threadx_stm32_delimiter_offset < _z_threadx_stm32_last_dma_offset) {
-        size_t second_part = RX_DMA_BUFFER_SIZE - _z_threadx_stm32_last_dma_offset;
-        // flawfinder: ignore
-        memcpy(_z_threadx_stm32_frame_buffer, _z_threadx_stm32_dma_buffer + _z_threadx_stm32_last_dma_offset,
-               second_part);
-        // flawfinder: ignore
-        memcpy(_z_threadx_stm32_frame_buffer + second_part, _z_threadx_stm32_dma_buffer,
-               _z_threadx_stm32_delimiter_offset);
-    } else {
-        // flawfinder: ignore
-        memcpy(_z_threadx_stm32_frame_buffer, _z_threadx_stm32_dma_buffer + _z_threadx_stm32_last_dma_offset, rb);
+        uint16_t delimiter_offset = _z_delimiter_fifo[_z_delimiter_tail];
+        _z_delimiter_tail = (_z_delimiter_tail + 1) % DELIMITER_FIFO_SIZE;
+
+        if (delimiter_offset < _z_threadx_stm32_last_dma_offset) {
+            rb = (RX_DMA_BUFFER_SIZE - _z_threadx_stm32_last_dma_offset) + delimiter_offset;
+        } else {
+            rb = delimiter_offset - _z_threadx_stm32_last_dma_offset;
+        }
+
+        if (rb == 0) {
+            continue;
+        }
+        if (rb > sizeof(_z_threadx_stm32_frame_buffer)) {
+            // Discard oversized/corrupted frame, advance read pointer past delimiter, and continue
+            _z_threadx_stm32_last_dma_offset = delimiter_offset;
+            continue;
+        }
+
+        if (delimiter_offset < _z_threadx_stm32_last_dma_offset) {
+            size_t second_part = RX_DMA_BUFFER_SIZE - _z_threadx_stm32_last_dma_offset;
+            // flawfinder: ignore
+            memcpy(_z_threadx_stm32_frame_buffer, _z_threadx_stm32_dma_buffer + _z_threadx_stm32_last_dma_offset,
+                   second_part);
+            // flawfinder: ignore
+            memcpy(_z_threadx_stm32_frame_buffer + second_part, _z_threadx_stm32_dma_buffer,
+                   delimiter_offset);
+        } else {
+            // flawfinder: ignore
+            memcpy(_z_threadx_stm32_frame_buffer, _z_threadx_stm32_dma_buffer + _z_threadx_stm32_last_dma_offset, rb);
+        }
+        _z_threadx_stm32_last_dma_offset = delimiter_offset;
+
+        _z_threadx_stm32_frame_len = rb;
+        _z_threadx_stm32_frame_offset = 0;
+        return rb;
     }
-    _z_threadx_stm32_last_dma_offset = _z_threadx_stm32_delimiter_offset;
-
-    tx_semaphore_put(&_z_threadx_stm32_data_processing_semaphore);
-
-    _z_threadx_stm32_frame_len = rb;
-    _z_threadx_stm32_frame_offset = 0;
-    return rb;
 }
 
 static size_t _z_threadx_stm32_uart_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t len) {
@@ -235,10 +244,12 @@ void zptxstm32_rx_event_cb(UART_HandleTypeDef *huart, uint16_t offset) {
 
     while (_z_threadx_stm32_isr_last_offset < end_offset) {
         if (_z_threadx_stm32_dma_buffer[_z_threadx_stm32_isr_last_offset] == (uint8_t)0x00) {
-            // Using NO_WAIT in ISR is required to avoid HardFaults
-            tx_semaphore_get(&_z_threadx_stm32_data_processing_semaphore, TX_NO_WAIT);
-            _z_threadx_stm32_delimiter_offset = _z_threadx_stm32_isr_last_offset + 1;
-            tx_semaphore_put(&_z_threadx_stm32_data_ready_semaphore);
+            uint8_t next_head = (_z_delimiter_head + 1) % DELIMITER_FIFO_SIZE;
+            if (next_head != _z_delimiter_tail) {
+                _z_delimiter_fifo[_z_delimiter_head] = _z_threadx_stm32_isr_last_offset + 1;
+                _z_delimiter_head = next_head;
+                tx_semaphore_put(&_z_threadx_stm32_data_ready_semaphore);
+            }
         }
         ++_z_threadx_stm32_isr_last_offset;
     }
@@ -248,9 +259,12 @@ void zptxstm32_rx_event_cb(UART_HandleTypeDef *huart, uint16_t offset) {
         _z_threadx_stm32_isr_last_offset = 0;
         while (_z_threadx_stm32_isr_last_offset < offset) {
             if (_z_threadx_stm32_dma_buffer[_z_threadx_stm32_isr_last_offset] == (uint8_t)0x00) {
-                tx_semaphore_get(&_z_threadx_stm32_data_processing_semaphore, TX_NO_WAIT);
-                _z_threadx_stm32_delimiter_offset = _z_threadx_stm32_isr_last_offset + 1;
-                tx_semaphore_put(&_z_threadx_stm32_data_ready_semaphore);
+                uint8_t next_head = (_z_delimiter_head + 1) % DELIMITER_FIFO_SIZE;
+                if (next_head != _z_delimiter_tail) {
+                    _z_delimiter_fifo[_z_delimiter_head] = _z_threadx_stm32_isr_last_offset + 1;
+                    _z_delimiter_head = next_head;
+                    tx_semaphore_put(&_z_threadx_stm32_data_ready_semaphore);
+                }
             }
             ++_z_threadx_stm32_isr_last_offset;
         }
@@ -267,8 +281,10 @@ void zptxstm32_error_event_cb(UART_HandleTypeDef *huart) {
     __HAL_UART_CLEAR_FLAG(&ZENOH_HUART, UART_CLEAR_ALL_ERRORS);
     ZENOH_HUART.RxState = HAL_UART_STATE_READY;
     _z_threadx_stm32_isr_last_offset = 0;
-    _z_threadx_stm32_delimiter_offset = 0;
+    _z_delimiter_head = 0;
+    _z_delimiter_tail = 0;
     _z_threadx_stm32_last_dma_offset = 0;
+    while (tx_semaphore_get(&_z_threadx_stm32_data_ready_semaphore, TX_NO_WAIT) == TX_SUCCESS) {}
     memset(_z_threadx_stm32_dma_buffer, 0xFF, sizeof(_z_threadx_stm32_dma_buffer));
     HAL_UARTEx_ReceiveToIdle_DMA(&ZENOH_HUART, _z_threadx_stm32_dma_buffer, RX_DMA_BUFFER_SIZE);
 }

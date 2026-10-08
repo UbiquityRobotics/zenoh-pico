@@ -19,11 +19,30 @@
 extern TX_BYTE_POOL *pthreadx_byte_pool;
 
 /*------------------ Random ------------------*/
+extern uint32_t uuid_hash(void);
+static bool _z_seeded = false;
+
+static void _z_ensure_random_seeded(void) {
+    if (!_z_seeded) {
+        const uint32_t *uid = (const uint32_t *)(0x1FFF7590UL);
+        // Mix all 96 bits of STM32 Unique Device ID + MurmurHash + ThreadX timer tick
+        uint32_t seed = uuid_hash() ^ uid[0] ^ uid[1] ^ uid[2] ^ (uint32_t)tx_time_get();
+        if (seed == 0) {
+            seed = 1;
+        }
+        srandom(seed);
+        _z_seeded = true;
+    }
+}
+
 uint8_t z_random_u8(void) { return z_random_u32(); }
 
 uint16_t z_random_u16(void) { return z_random_u32(); }
 
-uint32_t z_random_u32(void) { return random(); }
+uint32_t z_random_u32(void) {
+    _z_ensure_random_seeded();
+    return random();
+}
 
 uint64_t z_random_u64(void) {
     uint64_t ret = 0;
@@ -34,6 +53,7 @@ uint64_t z_random_u64(void) {
 }
 
 void z_random_fill(void *buf, size_t len) {
+    _z_ensure_random_seeded();
     for (size_t i = 0; i < len; i++) {
         ((uint8_t *)buf)[i] = z_random_u8();
     }

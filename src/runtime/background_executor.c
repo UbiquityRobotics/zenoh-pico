@@ -130,10 +130,14 @@ z_result_t _z_background_executor_inner_stop(_z_background_executor_inner_t *be)
     }
     be->_thread_idx++;
     _z_atomic_bool_store(&be->_started, false, _z_memory_order_release);
-    _z_task_t task_to_join = be->_task;
+    // NOTE: join the task by pointer. On ThreadX/STM32 _z_task_t embeds the TX_THREAD control block AND
+    // its whole stack (Z_TASK_STACK_SIZE = 4 KB). Copying it by value (`_z_task_t t = be->_task;`) put
+    // ~4.3 KB on the caller's stack (overflowing the 4 KB comms thread stack -> HardFault) and joined /
+    // deleted a *copy* of the TX_THREAD, corrupting the ThreadX created-thread list.
+    _z_task_t *task_to_join = &be->_task;
     z_result_t ret = _z_background_executor_inner_unlock_and_resume(be);
     // after resume the executor thread will proceed to stop directly without trying to execute any tasks
-    _Z_SET_IF_OK(ret, _z_task_join(&task_to_join));
+    _Z_SET_IF_OK(ret, _z_task_join(task_to_join));
     return ret;
 }
 
